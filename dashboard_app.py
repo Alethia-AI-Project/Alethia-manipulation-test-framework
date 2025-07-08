@@ -290,6 +290,7 @@ app.layout = html.Div([
     html.Link(id="theme-link", rel="stylesheet", href=DARK_THEME),
     dcc.Store(id="theme-store", data="dark"),
     dcc.Store(id="llm-debug", data=[]),
+    dcc.Store(id="judge-store"),
     dbc.Container(
         fluid=True,
         children=[
@@ -565,6 +566,7 @@ app.layout = html.Div([
         Output("explanations", "children"),
         Output("download-json", "data"),
         Output("llm-debug", "data"),
+        Output("judge-store", "data"),
     ],
     [
         Input("upload-data", "contents"),
@@ -574,16 +576,33 @@ app.layout = html.Div([
         Input("llm-provider", "value"),
         Input("pattern-filter", "value"),
     ],
-    [State("upload-data", "filename"), State("theme-toggle", "value"), State("llm-debug", "data")],
+    [
+        State("upload-data", "filename"),
+        State("theme-toggle", "value"),
+        State("llm-debug", "data"),
+        State("judge-store", "data"),
+    ],
 )
 
-def update_output(contents, view_mode, download_clicks, judge_clicks, provider, selected_patterns, filename, light_on, debug_log):
+def update_output(
+    contents,
+    view_mode,
+    download_clicks,
+    judge_clicks,
+    provider,
+    selected_patterns,
+    filename,
+    light_on,
+    debug_log,
+    judge_data,
+):
     bg = "#ffffff" if light_on else "#1a1a1a"
     text_color = "black" if light_on else "white"
     log_entries = list(debug_log or [])
     def log(msg):
         logger.info(msg)
         log_entries.append(f"[{datetime.utcnow().isoformat()}] {msg}")
+    judge_results = judge_data
     if contents is None:
         empty_fig = create_empty_figure("Waiting for upload", bg, text_color)
         timeline_empty = create_empty_figure("Waiting for upload", bg, text_color)
@@ -607,6 +626,7 @@ def update_output(contents, view_mode, download_clicks, judge_clicks, provider, 
             "",
             None,
             debug_log,
+            None,
         ]
 
     conv = parse_uploaded_file(contents, filename)
@@ -989,7 +1009,6 @@ def update_output(contents, view_mode, download_clicks, judge_clicks, provider, 
     )
 
 
-    judge_results = None
     judge_div = html.Div()
     summary_text = ""
     if judge_clicks:
@@ -1004,7 +1023,13 @@ def update_output(contents, view_mode, download_clicks, judge_clicks, provider, 
             logger.warning("Judge request failed: %s", exc)
             judge_div = dbc.Alert(str(exc), color="warning", className="mt-2")
         else:
-            if judge_results and isinstance(judge_results, dict):
+            if not judge_results or not isinstance(judge_results, dict):
+                msg = "LLM judge results could not be parsed"
+                log(msg)
+                logger.warning("%s: %r", msg, judge_results)
+                judge_div = dbc.Alert(msg, color="warning", className="mt-2")
+                judge_results = None
+            else:
                 header = [html.Th("Index"), html.Th("Text")] + [html.Th(f.replace('_', ' ').title()) for f in ALL_FLAG_NAMES]
                 rows = [html.Tr(header)]
                 for item in judge_results.get("flagged", []):
@@ -1016,8 +1041,6 @@ def update_output(contents, view_mode, download_clicks, judge_clicks, provider, 
                 judge_div = html.Table(rows, className="table table-sm table-dark")
                 log("processed results")
                 logger.debug("Merged judge results for plotting")
-            else:
-                judge_div = html.Div("No manipulative bot messages detected.", className="text-muted")
 
             merged_for_plots = merge_judge_results(judge_results)
             summary_text = summarize_judge_results(merged_for_plots)
@@ -1032,6 +1055,33 @@ def update_output(contents, view_mode, download_clicks, judge_clicks, provider, 
                         hovertemplate="Message %{x} – %{y} flags (LLM)",
                     )
                 )
+    elif judge_results is not None:
+        if judge_results and isinstance(judge_results, dict):
+            header = [html.Th("Index"), html.Th("Text")] + [html.Th(f.replace('_', ' ').title()) for f in ALL_FLAG_NAMES]
+            rows = [html.Tr(header)]
+            for item in judge_results.get("flagged", []):
+                row = [html.Td(item.get("index")), html.Td(item.get("text"))]
+                flags = item.get("flags", {})
+                for f in ALL_FLAG_NAMES:
+                    row.append(html.Td(str(flags.get(f, False))))
+                rows.append(html.Tr(row))
+            judge_div = html.Table(rows, className="table table-sm table-dark")
+        else:
+            judge_div = html.Div("No manipulative bot messages detected.", className="text-muted")
+
+        merged_for_plots = merge_judge_results(judge_results)
+        summary_text = summarize_judge_results(merged_for_plots)
+        judge_timeline = compute_llm_flag_timeline(merged_for_plots, len(results["features"]))
+        if any(judge_timeline):
+            timeline_fig.add_trace(
+                go.Scatter(
+                    y=judge_timeline,
+                    mode="markers",
+                    marker=dict(color="#EF553B"),
+                    name="LLM Judge",
+                    hovertemplate="Message %{x} – %{y} flags (LLM)",
+                )
+            )
     if judge_results is not None:
         merged_for_plots = merge_judge_results(judge_results)
         comparison_fig = build_flag_comparison_figure(
@@ -1079,6 +1129,7 @@ def update_output(contents, view_mode, download_clicks, judge_clicks, provider, 
         explanations,
         download_data,
         log_entries,
+        judge_results,
     )
 
 
